@@ -1,0 +1,197 @@
+#!/usr/bin/perl -Wl
+use strict;
+use warnings;
+use diagnostics;
+use Class::Struct;
+use XML::DOM;
+# use XML::Parser;
+# use XML::Simple;
+use XML::LibXML;
+use Data::Dumper;
+
+struct( xrdInfo => [
+        srv         => '$',        # server fqdn:xrd_port
+        xrdVer      => '$',        # xrootd version
+        srvType     => '$',        # type of service : server or manager
+        xrdsp_tot   => '$',        # total space - converted to MiB with 2 decimals
+        xrdsp_free  => '$',        # free space - converted to MiB with 2 decimals
+        xrdsp_lrgst => '$',        # Largest free chunk - converted to MiB with 2 decimals
+    ]);
+
+## add location of perl ApMon modules
+use lib '/usr/share/perl5/ApMon';
+use ApMon;
+
+my $SITE = "ALICE::ISS::FILE";
+my $RD = "";
+
+my @aListOfXrdSrvProp = ();
+
+#################################
+## FUNCTIONS
+#################################
+sub ltrim { my $s = shift; $s =~ s/^\s+//;       return $s };
+sub rtrim { my $s = shift; $s =~ s/\s+$//;       return $s };
+sub  trim { my $s = shift; $s =~ s/^\s+|\s+$//g; return $s };
+
+#################################
+##   get the xrdinfo for each server argument
+#################################
+sub  getXrdInfo {
+    my $s = shift;
+#     my $XRDFS_CMD = 'echo -ne "query config version\nspaceinfo /\nexit\n" |/usr/bin/xrdfs ' . $s . ' | ';
+    my $XRDFS_CMD = '/usr/bin/xrdfs ' . $s . ' query stats p | ';
+
+    my $XRD_INFO;
+    open ( $XRD_INFO, $XRDFS_CMD  ) or die "xrdfs failed: $!\n";
+
+    my $parser = XML::LibXML->new();
+    my $dom = $parser->load_xml({ IO => $XRD_INFO} );
+
+#     print $dom->toString(3);
+
+    my $XrdVer     = $dom->getElementsByTagName('statistics')->item(0)->getAttributeNode('ver')->getFirstChild->data;
+    my $XrdSrvType = $dom->getElementsByTagName('statistics')->item(0)->getAttributeNode('ins')->getFirstChild->data;
+
+    my $XrdSpaceTot   = $dom->findnodes("/statistics/stats/space/stats/tot")->string_value();
+    my $XrdSpaceFree  = $dom->findnodes("/statistics/stats/space/stats/free")->string_value();
+    my $XrdSpaceLrgst = $dom->findnodes("/statistics/stats/space/stats/maxf")->string_value();
+
+    my $SRV = xrdInfo->new (
+                            srv         => $s,
+                            xrdVer      => $XrdVer,
+                            srvType     => $XrdSrvType,
+                            xrdsp_tot   => $XrdSpaceTot,
+                            xrdsp_free  => $XrdSpaceFree,
+                            xrdsp_lrgst => $XrdSpaceLrgst,
+                            );
+
+    push @aListOfXrdSrvProp, $SRV;
+
+    close $XRD_INFO;
+}
+
+
+#################################
+## TODO - help && usage
+#################################
+
+#################################
+## TODO - DAEMON MANAGEMENT - SELF DAEMONIZE
+#################################
+
+#################################
+## TODO - information about self 
+#################################
+
+## how to get associated ML destination from alimonitor.cern.ch/services/se.jsp
+
+# export SE_NAME="ALICE::ISS::FILE" ; [[ -n "${SE_NAME}" ]] && se="${SE_NAME}_"
+ 
+# MONALISA_HOST_INFO=$( host $( curl -s http://alimonitor.cern.ch/services/getClosestSite.jsp?ml_ip=true | awk -F, '{print $1}' ) )
+# MONALISA_HOST=$( echo "$MONALISA_HOST_INFO" | awk '{ print substr ($NF,1,length($NF)-1);}' )
+
+#################################
+##   get the redirector of the specified site
+#################################
+my $SE_INFO_CMD = 'curl -fsSLk http://alimonitor.cern.ch/services/se.jsp?se=' . $SITE . ' | ';
+# print "SE_INFO_CMD = $SE_INFO_CMD\n";
+
+my $SE_INFO;
+open ( $SE_INFO, $SE_INFO_CMD  ) or die "SE_INFO failed: $!\n";
+while( my $line = <$SE_INFO>)  {
+    chomp($line);
+    my $myline = trim ($line);
+    my @fields = split ': ', $myline;
+    if (index($fields[0], "seioDaemons") != -1) { $RD = $fields[1]; $RD =~ s/root:\/\///; last;}
+    }
+close $SE_INFO;
+
+print "redirector is : $RD\n";
+
+
+#################################
+##   parse all servers registered to redirector
+#################################
+
+## get xrd space info; Reported size in bytes; convert to MiB with 2 decimals
+# totsp=$(echo "$xrdinfo" | grep Total | awk -F: '{printf "%.2f\n",$2/1048576}')
+# freesp=$(echo "$xrdinfo" | grep Free | awk -F: '{printf "%.2f\n",$2/1048576}')
+# lrgst=$(echo "$xrdinfo" | grep Largest | awk -F: '{printf "%.2f\n",$2/1048576}')
+
+my $XRDMAPC_CMD = '/usr/bin/xrdmapc --list s --quiet --refresh ' . $RD . ' | ' ;
+
+my $XRDMAPC;
+open ( $XRDMAPC, $XRDMAPC_CMD ) or die "xrdmapc failed: $!\n";
+# print $XRDMAPC ;
+
+while( my $line = <$XRDMAPC>)  {
+    chomp($line);
+    my $myline = trim ($line);
+    my @fields = split ' ', $line;
+
+    my $SRV = $fields[1];
+#     print $SRV;
+
+    getXrdInfo ($SRV);
+#     print "\n";
+    }
+
+close $XRDMAPC;
+
+print @aListOfXrdSrvProp;
+
+for my $srv (@aListOfXrdSrvProp) {
+    print $srv->srv;
+    print $srv->xrdVer;
+    print $srv->srvType;
+    print $srv->xrdsp_tot;
+    print $srv->xrdsp_free;
+    print $srv->xrdsp_lrgst;
+    print "\n";
+}
+
+
+
+#################################
+## TODO - Send information to ML destination
+#################################
+
+# my $apm = new ApMon(0);
+# $apm->setLogLevel('$APMON_DEBUG_LEVEL');
+# $apm->setDestinations($destination);
+# $apm->setMonitorClusterNode('${hostGroup}_SysInfo', '$host');$srvMonCmds
+# 
+# my $pid = fork();
+# if($pid == 0) {
+#   while(1) {
+#     open (MYFILE, ">$pidfile.$$") or die "Couldn't open: $!";
+#     print MYFILE $$;
+#     close (MYFILE);
+# 
+#     $apm->sendBgMonitoring();
+#     print '$xrdver' . "\n";
+#     $apm->sendParameters('$nodename4space', '$host', 'xrootd_version', '$xrdver');
+#     $apm->sendParameters('$nodename4space', '$host', 'space_total', '$totsp');
+#     $apm->sendParameters('$nodename4space', '$host', 'space_free', '$freesp');
+#     $apm->sendParameters('$nodename4space', '$host', 'space_largestfreechunk', '$lrgst');
+#     sleep(120);
+#     }
+#   }
+# else {
+#   my $Line;
+#   my $Var;
+#   my $Val;
+#   my %Statsdata;
+#   open my $Stdout, "/usr/bin/mpxstats -f flat -p 1234 |";
+#   while (<$Stdout>) {
+#     undef %Statsdata;
+#     $Line = "$_";
+#     ($Var,$Val) = split(' ',$Line);
+#     if(defined($Var)) { $Statsdata{$Var} = $Val; }
+#     $apm->sendParameters('${hostGroup}_ApMon_Info', '$host', %Statsdata);
+#     }
+#   }
+
+
+
